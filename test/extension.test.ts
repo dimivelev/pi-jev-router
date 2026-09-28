@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -75,6 +75,11 @@ test("router is opt-in, routes tasks, skips images, restores the base model, and
 		const agentSettled = async () => {
 			for (const handler of handlers.get("agent_settled") ?? []) await handler({ type: "agent_settled" }, ctx);
 		};
+		const startNewSession = async () => {
+			for (const handler of handlers.get("session_start") ?? []) {
+				await handler({ type: "session_start", reason: "new" }, ctx);
+			}
+		};
 		const routerCommand = commands.get("jev-router");
 		assert.ok(routerCommand);
 
@@ -105,6 +110,7 @@ test("router is opt-in, routes tasks, skips images, restores the base model, and
 		assert.ok(notices.some((message) => message.includes("OPENCODE_API_KEY")));
 		process.env.OPENCODE_API_KEY = "test-secret";
 		await routerCommand.handler("on", ctx);
+		assert.equal(JSON.parse(readFileSync(join(agentDir, "jev-router.json"), "utf8")).autoStart, true);
 
 		await beforeAgentStart("Summarize this sentence");
 		assert.equal(activeModel.id, "cheap");
@@ -131,10 +137,18 @@ test("router is opt-in, routes tasks, skips images, restores the base model, and
 		assert.equal(requests, beforeImageRequests, "image prompts should not be sent to Jev");
 		assert.equal(activeModel.id, "base", "image request must retain the user's model");
 
+		await startNewSession();
+		const beforeRestartRequests = requests;
+		await beforeAgentStart("A small task in a new session");
+		assert.equal(requests, beforeRestartRequests + 1, "router should auto-enable in later sessions after /on");
+		await agentSettled();
+		assert.equal(activeModel.id, "base");
+
 		await routerCommand.handler("off", ctx);
+		assert.equal(JSON.parse(readFileSync(join(agentDir, "jev-router.json"), "utf8")).autoStart, false);
 		const beforeDisabledRequests = requests;
 		await beforeAgentStart("Summarize this sentence");
-		assert.equal(requests, beforeDisabledRequests, "off must stop all Jev requests");
+		assert.equal(requests, beforeDisabledRequests, "off must stop Jev requests in later sessions");
 		assert.equal(activeModel.id, "base");
 	} finally {
 		globalThis.fetch = originalFetch;

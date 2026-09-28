@@ -1,51 +1,69 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyTask, selectTier } from "../policy.ts";
+import { classifyTask, classifyTier, selectTier } from "../policy.ts";
 
-test("selects cheap only for a confident cheap classification", () => {
-	assert.equal(selectTier({ answers: { task_tier: { type: "choice", choice: "cheap", confidence: 0.9, probabilities: { cheap: 0.95, expensive: 0.05 } } } }, 0.8), "cheap");
-	assert.equal(selectTier({ answers: { task_tier: { type: "choice", choice: "cheap", confidence: 0.79, probabilities: { cheap: 0.9, expensive: 0.1 } } } }, 0.8), "expensive");
+const noulResponse = (probability: number) => ({
+	answers: { task_tier: { type: "noul", noul: probability } },
 });
 
-test("routes expensive and malformed or uncertain answers conservatively", () => {
-	assert.equal(selectTier({ answers: { task_tier: { type: "choice", choice: "expensive", confidence: 0.6, probabilities: { cheap: 0.4, expensive: 0.6 } } } }, 0.8), "expensive");
-	assert.equal(selectTier({ answers: { task_tier: { type: "noul", noul: 0 } } }, 0.8), "expensive");
-	assert.equal(selectTier({ answers: { task_tier: { type: "choice", choice: "unknown", confidence: 1, probabilities: { cheap: 0, expensive: 1 } } } }, 0.8), "expensive");
-	assert.equal(selectTier({ answers: { task_tier: { type: "choice", choice: "cheap", confidence: 1, probabilities: { cheap: 0, expensive: 1 } } } }, 0.8), "expensive");
-	assert.equal(selectTier({}, 0.8), "expensive");
+test("routes on the direct Noul probability at the configured threshold", () => {
+	assert.equal(selectTier(noulResponse(0.9), 0.7), "cheap");
+	assert.equal(selectTier(noulResponse(0.7), 0.7), "cheap");
+	assert.equal(selectTier(noulResponse(0.69), 0.7), "expensive");
+	assert.equal(selectTier(noulResponse(0), 0.7), "expensive");
 });
 
-test("posts the current task to the official TypeSafe endpoint with bearer auth", async () => {
+test("routes malformed answers and invalid probabilities conservatively", () => {
+	assert.equal(selectTier({}, 0.7), "expensive");
+	assert.equal(selectTier({ answers: { task_tier: { type: "noul", noul: 2 } } }, 0.7), "expensive");
+	assert.equal(selectTier({ answers: { task_tier: { type: "noul", noul: "0.9" } } }, 0.7), "expensive");
+});
+
+test("retains Choice compatibility without applying derived confidence a second time", () => {
+	const response = {
+		answers: {
+			task_tier: {
+				type: "choice",
+				choice: "cheap",
+				confidence: 0.5,
+				probabilities: { cheap: 0.85, expensive: 0.15 },
+			},
+		},
+	};
+	assert.equal(selectTier(response, 0.8), "cheap");
+	assert.deepEqual(classifyTier(response, 0.8), { tier: "cheap", cheapProbability: 0.85 });
+});
+
+test("posts a Noul question to TypeSafe and uses the response probability", async () => {
 	let capturedUrl = "";
 	let capturedInit: RequestInit | undefined;
 	const fakeFetch: typeof fetch = async (input, init) => {
 		capturedUrl = String(input);
 		capturedInit = init;
-		return new Response(JSON.stringify({
-			answers: { task_tier: { type: "choice", choice: "cheap", confidence: 0.95, probabilities: { cheap: 0.98, expensive: 0.02 } } },
-		}), { status: 200, headers: { "Content-Type": "application/json" } });
+		return new Response(JSON.stringify(noulResponse(0.82)), { status: 200, headers: { "Content-Type": "application/json" } });
 	};
 
-	const tier = await classifyTask("Summarize this sentence", "test-secret", 0.8, undefined, fakeFetch);
-	assert.equal(tier, "cheap");
+	const decision = await classifyTask("Summarize this sentence", "test-secret", 0.7, undefined, fakeFetch);
+	assert.deepEqual(decision, { tier: "cheap", cheapProbability: 0.82 });
 	assert.equal(capturedUrl, "https://api.typesafe.ai/v1/systemone");
 	assert.equal(capturedInit?.method, "POST");
 	assert.equal(new Headers(capturedInit?.headers).get("Authorization"), "Bearer test-secret");
 	const body = JSON.parse(String(capturedInit?.body));
 	assert.equal(body.state, "Summarize this sentence");
 	assert.equal(body.model, "jev-latest");
-	assert.equal(body.questions.task_tier.type, "choice");
+	assert.equal(body.questions.task_tier.type, "noul");
 });
 
-test("uses OpenCode Zen's Jev endpoint and selected model", async () => {
+test("uses OpenCode Zen's Jev Free endpoint and model", async () => {
 	let capturedUrl = "";
 	let capturedInit: RequestInit | undefined;
 	const fakeFetch: typeof fetch = async (input, init) => {
 		capturedUrl = String(input);
 		capturedInit = init;
-		return new Response(JSON.stringify({ answers: {} }), { status: 200 });
+		return new Response(JSON.stringify(noulResponse(0.2)), { status: 200 });
 	};
-	await classifyTask("task", "zen-key", 0.8, undefined, fakeFetch, { backend: "opencode-zen", model: "jev-1.13-free" });
+	const decision = await classifyTask("task", "zen-key", 0.7, undefined, fakeFetch, { backend: "opencode-zen", model: "jev-1.13-free" });
+	assert.deepEqual(decision, { tier: "expensive", cheapProbability: 0.2 });
 	assert.equal(capturedUrl, "https://opencode.ai/zen/v1/systemone");
 	assert.equal(JSON.parse(String(capturedInit?.body)).model, "jev-1.13-free");
 	assert.equal(new Headers(capturedInit?.headers).get("Authorization"), "Bearer zen-key");
@@ -58,9 +76,9 @@ test("supports a custom Jev-compatible endpoint and omits auth when no key is co
 	const fakeFetch: typeof fetch = async (input, init) => {
 		capturedUrl = String(input);
 		capturedInit = init;
-		return new Response(JSON.stringify({ answers: {} }), { status: 200 });
+		return new Response(JSON.stringify(noulResponse(0.95)), { status: 200 });
 	};
-	await classifyTask("task", "", 0.8, undefined, fakeFetch, {
+	await classifyTask("task", "", 0.7, undefined, fakeFetch, {
 		backend: "custom",
 		endpoint: "https://proxy.example/v1/systemone",
 		model: "jev-custom-v2",
@@ -72,5 +90,5 @@ test("supports a custom Jev-compatible endpoint and omits auth when no key is co
 
 test("treats TypeSafe HTTP errors as classification failures", async () => {
 	const fakeFetch: typeof fetch = async () => new Response("unavailable", { status: 503 });
-	await assert.rejects(() => classifyTask("task", "test-secret", 0.8, undefined, fakeFetch), /HTTP 503/);
+	await assert.rejects(() => classifyTask("task", "test-secret", 0.7, undefined, fakeFetch), /HTTP 503/);
 });

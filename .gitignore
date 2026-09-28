@@ -1,5 +1,7 @@
 node_modules/
 coverage/
+jev-router.json
+jev-router-secrets.json
 *.log
 *.tsbuildinfo
 .env

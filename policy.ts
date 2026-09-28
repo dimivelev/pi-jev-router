@@ -7,64 +7,78 @@ export interface JevApiOptions {
 	model?: string;
 }
 
-const CHOICE_ID = "task_tier";
-const DEFAULT_CHEAP_CONFIDENCE = 0.8;
+export interface TierClassification {
+	tier: ModelTier;
+	cheapProbability?: number;
+}
 
-/** Fail toward the expensive tier unless Jev returns a valid, confident cheap decision. */
-export function selectTier(response: unknown, threshold: number): ModelTier {
-	const minimumConfidence = Number.isFinite(threshold) && threshold >= 0 && threshold <= 1
-		? threshold
-		: DEFAULT_CHEAP_CONFIDENCE;
-	if (!response || typeof response !== "object") return "expensive";
+const QUESTION_ID = "task_tier";
+export const DEFAULT_CHEAP_PROBABILITY = 0.7;
+
+function validProbability(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+/** Read Jev's direct yes-probability; also accept Choice responses from older compatible endpoints. */
+export function classifyTier(response: unknown, threshold: number): TierClassification {
+	const minimumProbability = validProbability(threshold) ? threshold : DEFAULT_CHEAP_PROBABILITY;
+	if (!response || typeof response !== "object") return { tier: "expensive" };
 
 	const answers = (response as { answers?: Record<string, unknown> }).answers;
-	const answer = answers?.[CHOICE_ID];
-	if (!answer || typeof answer !== "object") return "expensive";
+	const answer = answers?.[QUESTION_ID];
+	if (!answer || typeof answer !== "object") return { tier: "expensive" };
 
 	const result = answer as {
 		type?: unknown;
+		noul?: unknown;
 		choice?: unknown;
-		confidence?: unknown;
 		probabilities?: Record<string, unknown>;
 	};
-	if (result.type !== "choice" || (result.choice !== "cheap" && result.choice !== "expensive")) return "expensive";
-	if (typeof result.confidence !== "number" || !Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1) {
-		return "expensive";
+	let cheapProbability: number | undefined;
+	if (result.type === "noul") {
+		if (validProbability(result.noul)) cheapProbability = result.noul;
+	} else if (result.type === "choice" && (result.choice === "cheap" || result.choice === "expensive")) {
+		const probabilities = result.probabilities;
+		const cheap = probabilities?.cheap;
+		const expensive = probabilities?.expensive;
+		if (validProbability(cheap) && validProbability(expensive) && Math.abs(cheap + expensive - 1) <= 0.02) {
+			const agreesWithDistribution = result.choice === "cheap" ? cheap >= expensive : expensive >= cheap;
+			if (agreesWithDistribution) cheapProbability = cheap;
+		}
 	}
 
-	const probabilities = result.probabilities;
-	const cheapProbability = probabilities?.cheap;
-	const expensiveProbability = probabilities?.expensive;
-	if (
-		typeof cheapProbability !== "number" || !Number.isFinite(cheapProbability) || cheapProbability < 0 || cheapProbability > 1 ||
-		typeof expensiveProbability !== "number" || !Number.isFinite(expensiveProbability) || expensiveProbability < 0 || expensiveProbability > 1 ||
-		Math.abs(cheapProbability + expensiveProbability - 1) > 0.02
-	) {
-		return "expensive";
-	}
+	if (cheapProbability === undefined) return { tier: "expensive" };
+	return {
+		tier: cheapProbability >= minimumProbability ? "cheap" : "expensive",
+		cheapProbability,
+	};
+}
 
-	const selectedProbability = result.choice === "cheap" ? cheapProbability : expensiveProbability;
-	const otherProbability = result.choice === "cheap" ? expensiveProbability : cheapProbability;
-	if (selectedProbability < otherProbability) return "expensive";
-	return result.choice === "cheap" && result.confidence >= minimumConfidence ? "cheap" : "expensive";
+export function selectTier(response: unknown, threshold: number): ModelTier {
+	return classifyTier(response, threshold).tier;
 }
 
 /** Ask Jev to classify only the supplied task text; callers own timeout and privacy controls. */
 export async function classifyTask(
 	state: string,
 	apiKey: string,
-	confidenceThreshold: number,
+	cheapProbabilityThreshold: number,
 	signal?: AbortSignal,
 	fetchImpl: typeof fetch = fetch,
 	api: JevApiOptions = { backend: "typesafe" },
-): Promise<ModelTier> {
+): Promise<TierClassification> {
 	const endpoint = api.backend === "typesafe"
 		? "https://api.typesafe.ai/v1/systemone"
 		: api.backend === "opencode-zen"
 			? "https://opencode.ai/zen/v1/systemone"
 			: api.endpoint;
-	const model = api.backend === "typesafe" ? "jev-latest" : api.backend === "opencode-zen" ? (api.model || "jev-1.13") : (api.model || "jev-latest");
+	const model = api.backend === "typesafe"
+		? "jev-latest"
+		: api.backend === "opencode-zen"
+			? api.model || "jev-1.13-free"
+			: api.model || "jev-latest";
 	if (!endpoint) throw new Error("A custom Jev endpoint is required");
+
 	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers: {
@@ -77,24 +91,24 @@ export async function classifyTask(
 			state,
 			model,
 			questions: {
-				[CHOICE_ID]: {
-					type: "choice",
-					instructions: "Choose the model tier that can complete this task reliably, using only the supplied task text. If uncertain, choose expensive.",
+				[QUESTION_ID]: {
+					type: "noul",
+					instructions: "Would a lower-cost general chat model likely complete this task correctly without deeper reasoning? Judge the actual work requested, not how important the user says it is.",
 					criteria: {
-						cheap: "A clear, narrow, low-stakes, routine one-step task: simple explanation, brief summary, straightforward formatting, or a tiny localized change.",
-						expensive: "A multi-step, ambiguous, novel, or high-stakes task; substantial coding, debugging, design, planning, analysis, or anything where missing nuance could reduce correctness.",
+						true: "Routine, narrow, low-stakes work: a simple explanation, brief summary, straightforward formatting, one-step question, or small localized code edit.",
+						false: "Multi-step coding or debugging, broad analysis or design, ambiguity, novel synthesis, high-stakes decisions, or work where missing nuance is likely to cause an error.",
 					},
 				},
 			},
 		}),
 	});
 
-	if (!response.ok) throw new Error(`TypeSafe API returned HTTP ${response.status}`);
+	if (!response.ok) throw new Error(`Jev API returned HTTP ${response.status}`);
 	let payload: unknown;
 	try {
 		payload = await response.json();
 	} catch {
-		throw new Error("TypeSafe API returned invalid JSON");
+		throw new Error("Jev API returned invalid JSON");
 	}
-	return selectTier(payload, confidenceThreshold);
+	return classifyTier(payload, cheapProbabilityThreshold);
 }

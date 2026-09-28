@@ -102,12 +102,37 @@ test("settings menu masks session keys, saves endpoint/model settings, and route
 
 		selections.push("Choose API backend", "TypeSafe direct (jev-latest)", "Close");
 		await router.handler("menu", ctx);
-		selections.push("Set/replace masked session API key", "Close");
+		selections.push("Set/replace and remember masked API key", "Close");
 		await router.handler("menu", ctx);
 		assert.equal(keyRenderings.length, 1);
 		const initialSettings = readFileSync(join(agentDir, "jev-router.json"), "utf8");
+		const savedKeysPath = join(agentDir, "jev-router-secrets.json");
+		const savedKeys = readFileSync(savedKeysPath, "utf8");
 		assert.equal(JSON.parse(initialSettings).apiBackend, "typesafe");
-		assert.equal(initialSettings.includes("session-secret"), false, "session-only key must not persist");
+		assert.equal(initialSettings.includes("session-secret"), false, "key must not enter ordinary settings");
+		assert.ok(savedKeys.includes("session-secret"), "menu key should be remembered privately");
+		assert.equal(statSync(savedKeysPath).mode & 0o777, 0o600);
+
+		const probeHandlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+		const probeCommands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+		const probePi: any = {
+			on: (name: string, handler: (event: any, context: any) => any) => {
+				const list = probeHandlers.get(name) ?? [];
+				list.push(handler);
+				probeHandlers.set(name, list);
+			},
+			registerCommand: (name: string, command: { handler: (args: string, context: any) => Promise<void> }) => probeCommands.set(name, command),
+			setModel: async () => true,
+		};
+		jevRouterExtension(probePi);
+		for (const handler of probeHandlers.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, ctx);
+		const probeRouter = probeCommands.get("jev-router");
+		assert.ok(probeRouter);
+		await probeRouter.handler("status", ctx);
+		assert.ok(notices.some((message) => message.includes("saved private key")), "a fresh extension runtime should load the saved key");
+		await probeRouter.handler("on", ctx);
+		assert.ok(notices.some((message) => message.includes("Jev auto-routing is on")), "saved API key should allow enabling after reload");
+		await probeRouter.handler("off", ctx);
 
 		inputs.push("https://proxy.example/v1/systemone");
 		selections.push("Choose API backend", "Custom Jev-compatible endpoint", "Close");
@@ -117,7 +142,7 @@ test("settings menu masks session keys, saves endpoint/model settings, and route
 		selections.push("Choose cheap model", "test/cheap — Cheap test", "Close");
 		await router.handler("menu", ctx);
 		inputs.push("0.91");
-		selections.push("Set cheap confidence threshold", "Close");
+		selections.push("Set cheap probability threshold", "Close");
 		await router.handler("menu", ctx);
 
 		selections.push("Choose API backend", "OpenCode Zen (Jev 1.13; separate from Go)", "Close");
@@ -135,26 +160,28 @@ test("settings menu masks session keys, saves endpoint/model settings, and route
 		assert.equal(settings.apiBackend, "custom");
 		assert.equal(settings.customEndpoint, "https://proxy.example/v1/systemone");
 		assert.equal(settings.cheapModel, "test/cheap");
-		assert.equal(settings.cheapConfidence, 0.91);
+		assert.equal(settings.cheapProbability, 0.91);
+		assert.equal(settings.autoStart, false, "router remains opt-in until /on is used");
 		assert.equal(settings.zenModel, "jev-1.13-free");
 		assert.equal(readFileSync(settingsPath, "utf8").includes("session-secret"), false);
 		assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
 
 		await router.handler("on", ctx);
+		assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).autoStart, true, "/on should remember auto-start");
 		let capturedUrl = "";
 		let capturedAuth: string | null = null;
 		globalThis.fetch = async (input, init) => {
 			capturedUrl = String(input);
 			capturedAuth = new Headers(init?.headers).get("Authorization");
 			return new Response(JSON.stringify({
-				answers: { task_tier: { type: "choice", choice: "cheap", confidence: 0.95, probabilities: { cheap: 0.98, expensive: 0.02 } } },
+				answers: { task_tier: { type: "noul", noul: 0.98 } },
 			}), { status: 200, headers: { "Content-Type": "application/json" } });
 		};
 		for (const handler of handlers.get("before_agent_start") ?? []) {
 			await handler({ type: "before_agent_start", prompt: "Small request" }, ctx);
 		}
 		assert.equal(capturedUrl, "https://proxy.example/v1/systemone");
-		assert.equal(capturedAuth, null, "session-only TypeSafe key must not be sent to a different backend");
+		assert.equal(capturedAuth, null, "saved TypeSafe key must not be sent to a different backend");
 		assert.equal(activeModel.id, "cheap");
 		for (const handler of handlers.get("agent_settled") ?? []) await handler({ type: "agent_settled" }, ctx);
 		assert.equal(activeModel.id, "base");

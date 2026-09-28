@@ -8,6 +8,7 @@ import { loadRouterSettings, normalizeRouterSettings, saveRouterSettings, valida
 test("defaults to OpenCode Zen Jev Free and validates custom API endpoints", () => {
 	assert.equal(normalizeRouterSettings({}).apiBackend, "opencode-zen");
 	assert.equal(normalizeRouterSettings({}).zenModel, "jev-1.13-free");
+	assert.equal(normalizeRouterSettings({}).autoStart, false);
 	assert.equal(validateCustomEndpoint("https://example.com/v1/systemone"), "https://example.com/v1/systemone");
 	assert.equal(validateCustomEndpoint("http://localhost:9911/v1/systemone"), "http://localhost:9911/v1/systemone");
 	assert.throws(() => validateCustomEndpoint("http://example.com/v1/systemone"), /HTTPS/);
@@ -27,12 +28,14 @@ test("persists only validated non-secret settings with private permissions", () 
 			customModel: "jev-1.13",
 			cheapModel: "opencode-go/deepseek-v4-flash",
 			expensiveModel: "openai-codex/gpt-6-astra",
-			cheapConfidence: 0.87,
+			cheapProbability: 0.87,
+			autoStart: true,
 			apiKey: "must-not-persist",
 		} as any, path);
 		const saved = readFileSync(path, "utf8");
 		assert.equal(JSON.parse(saved).apiBackend, "custom");
-		assert.equal(JSON.parse(saved).cheapConfidence, 0.87);
+		assert.equal(JSON.parse(saved).cheapProbability, 0.87);
+		assert.equal(JSON.parse(saved).autoStart, true);
 		assert.equal(saved.includes("must-not-persist"), false);
 		assert.equal(statSync(path).mode & 0o777, 0o600);
 		assert.deepEqual(loadRouterSettings(path), {
@@ -41,7 +44,8 @@ test("persists only validated non-secret settings with private permissions", () 
 			customModel: "jev-1.13",
 			cheapModel: "opencode-go/deepseek-v4-flash",
 			expensiveModel: "openai-codex/gpt-6-astra",
-			cheapConfidence: 0.87,
+			cheapProbability: 0.87,
+			autoStart: true,
 		});
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -54,5 +58,5 @@ test("drops invalid saved fields and invalid custom endpoints", () => {
 		customEndpoint: "http://not-local.example/v1/systemone",
 		cheapConfidence: 8,
 		cheapModel: "  ",
-	}), { apiBackend: "opencode-zen", zenModel: "jev-1.13-free" });
+	}), { apiBackend: "opencode-zen", zenModel: "jev-1.13-free", autoStart: false });
 });

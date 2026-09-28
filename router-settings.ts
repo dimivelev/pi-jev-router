@@ -12,7 +12,8 @@ export interface RouterSettings {
 	zenModel?: ZenJevModel;
 	cheapModel?: string;
 	expensiveModel?: string;
-	cheapConfidence?: number;
+	cheapProbability?: number;
+	autoStart?: boolean;
 }
 
 export function settingsFilePath(): string {
@@ -49,14 +50,14 @@ function validText(value: unknown, maxLength = 256): string | undefined {
 }
 
 function defaultRouterSettings(): RouterSettings {
-	return { apiBackend: "opencode-zen", zenModel: "jev-1.13-free" };
+	return { apiBackend: "opencode-zen", zenModel: "jev-1.13-free", autoStart: false };
 }
 
 export function normalizeRouterSettings(value: unknown): RouterSettings {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return defaultRouterSettings();
 	const input = value as Record<string, unknown>;
 	const apiBackend: JevBackend = input.apiBackend === "typesafe" || input.apiBackend === "custom" ? input.apiBackend : "opencode-zen";
-	const result: RouterSettings = { apiBackend };
+	const result: RouterSettings = { apiBackend, autoStart: input.autoStart === true };
 	if (apiBackend === "opencode-zen") result.zenModel = "jev-1.13-free";
 
 	if (typeof input.customEndpoint === "string") {
@@ -74,8 +75,9 @@ export function normalizeRouterSettings(value: unknown): RouterSettings {
 	if (cheapModel) result.cheapModel = cheapModel;
 	const expensiveModel = validText(input.expensiveModel, 256);
 	if (expensiveModel) result.expensiveModel = expensiveModel;
-	if (typeof input.cheapConfidence === "number" && Number.isFinite(input.cheapConfidence) && input.cheapConfidence >= 0 && input.cheapConfidence <= 1) {
-		result.cheapConfidence = input.cheapConfidence;
+	const probability = typeof input.cheapProbability === "number" ? input.cheapProbability : input.cheapConfidence;
+	if (typeof probability === "number" && Number.isFinite(probability) && probability >= 0 && probability <= 1) {
+		result.cheapProbability = probability;
 	}
 	return result;
 }

@@ -8,7 +8,7 @@ From this repository:
 
 ```sh
 mkdir -p ~/.pi/agent/extensions/jev-router
-cp index.ts policy.ts router-settings.ts ~/.pi/agent/extensions/jev-router/
+cp index.ts policy.ts router-settings.ts router-secrets.ts ~/.pi/agent/extensions/jev-router/
 ```
 
 Restart Pi or run `/reload`, then run `/jev-router` to open the settings menu. During development, load directly with `pi --extension ./index.ts` from this directory.
@@ -18,22 +18,22 @@ Restart Pi or run `/reload`, then run `/jev-router` to open the settings menu. D
 - Jev backend: **OpenCode Zen**, model `jev-1.13-free` (OpenCode marks it limited-time)
 - Cheap chat model: `opencode-go/deepseek-v4-flash`
 - Expensive chat model: `openai-codex/gpt-6-astra`
-- Minimum confidence for the cheap tier: `0.8`
-- Automatic routing: **off** until `/jev-router on`
+- Minimum Jev probability for the cheap tier: `0.7`
+- Automatic routing: off until first `/jev-router on`; `/on` remembers the choice for new sessions and `/off` clears it
 
 The menu can switch to standard OpenCode Zen `jev-1.13`, TypeSafe direct (`jev-latest`), or a custom Jev-compatible `/systemone` endpoint. OpenCode Zen is separate from the Go subscription; OpenCode's current published Go model list does not include Jev.
 
-The menu also edits the cheap/expensive Pi model pair and confidence threshold. It verifies model availability, text input support, authentication, and Pi's `enabledModels`/`--models` scope.
+The menu also edits the cheap/expensive Pi model pair and probability threshold. It verifies model availability, text input support, authentication, and Pi's `enabledModels`/`--models` scope.
 
 ## API keys
 
-Set the environment variable for the selected backend before starting Pi, or use the menu's masked key entry for the current Pi process only:
+Set the environment variable for the selected backend before starting Pi, or enter the key masked in the menu. Menu-entered keys are remembered separately from settings in `~/.pi/agent/jev-router-secrets.json` with mode `0600`. The file contains plaintext keys readable only by your OS user; use environment variables instead if you do not want keys stored on disk. Saved keys take precedence over environment keys for the same backend.
 
 - OpenCode Zen: `OPENCODE_API_KEY`
 - TypeSafe: `TYPESAFE_API_KEY`
 - Custom endpoint: `JEV_ROUTER_CUSTOM_API_KEY` (optional if the endpoint does not require auth)
 
-The extension never saves API keys to disk. For persistent keys, export the variable in the shell/service that launches Pi. `.env.example` is a reference only; Pi does not load `.env` files automatically.
+API keys are not written to the ordinary settings file or repository. A saved menu key takes precedence over its environment variable; “Clear saved/session API key” removes it and falls back to the environment. For environment-managed keys, export the variable in the shell/service that launches Pi; `.env.example` is a reference only, since Pi does not load `.env` files automatically.
 
 ## Custom endpoint safety
 
@@ -43,8 +43,8 @@ Non-secret settings are saved to `~/.pi/agent/jev-router.json` with mode `0600`.
 
 ## Routing behavior
 
-- A confident Jev `Choice` for `cheap` selects the cheap chat model.
-- An expensive, uncertain, or malformed answer selects the expensive model.
+- Jev answers a Noul question with a direct probability that the task is simple enough for the cheap model.
+- Probabilities at or above the configured threshold select cheap; lower, malformed, or missing scores select expensive.
 - Jev errors/timeouts and prompts over 12,000 characters fail toward expensive.
 - Prompts with images skip Jev and retain the current model.
 - Pi restores the pre-router model after the task completes.
@@ -56,16 +56,16 @@ Optional environment overrides (a saved menu setting takes precedence):
 ```sh
 export JEV_ROUTER_CHEAP_MODEL="provider/model-id"
 export JEV_ROUTER_EXPENSIVE_MODEL="provider/model-id"
-export JEV_ROUTER_CHEAP_CONFIDENCE="0.8" # 0..1
-export JEV_ROUTER_AUTO=1                 # opt in at each Pi startup
+export JEV_ROUTER_CHEAP_PROBABILITY="0.7" # 0..1
+export JEV_ROUTER_AUTO=1                    # force auto-start on; 0 forces it off
 ```
 
 ## Commands
 
 - `/jev-router` or `/jev-router menu` — open settings
-- `/jev-router on` — enable routing for this session
-- `/jev-router off` — disable routing and restore the prior model
-- `/jev-router status` — show backend, key source (never the key), models, and threshold
+- `/jev-router on` — enable routing and remember auto-start for new sessions
+- `/jev-router off` — disable routing for this and future sessions; restore the prior model
+- `/jev-router status` — show backend, key source (never the key), auto-start, models, threshold, and the last Jev probability
 
 ## Development
 
@@ -75,7 +75,7 @@ No npm dependencies are required. Run the tests with:
 npm test
 ```
 
-The tests mock network calls and cover routing policy, the TypeSafe/OpenCode Zen/custom APIs, settings-file permissions, menu behavior, and session-only key masking.
+The tests mock network calls and cover Noul/Choice routing, the TypeSafe/OpenCode Zen/custom APIs, settings and secret-file permissions, menu behavior, masked key persistence, and auto-start behavior.
 
 ## References
 

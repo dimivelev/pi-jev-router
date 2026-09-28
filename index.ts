@@ -10,10 +10,11 @@ import {
 	type RouterSettings,
 	type ZenJevModel,
 } from "./router-settings.ts";
+import { loadRouterSecrets, removeRouterSecret, saveRouterSecret, secretsFilePath, type RouterSecrets } from "./router-secrets.ts";
 
 const DEFAULT_CHEAP_MODEL = "opencode-go/deepseek-v4-flash";
 const DEFAULT_EXPENSIVE_MODEL = "openai-codex/gpt-6-astra";
-const DEFAULT_CONFIDENCE = 0.8;
+const DEFAULT_CHEAP_PROBABILITY = 0.7;
 const MAX_PROMPT_CHARS = 12_000;
 const JEV_TIMEOUT_MS = 6_000;
 
@@ -34,12 +35,12 @@ function configuredModelRefs(settings: RouterSettings): Record<ModelTier, string
 	};
 }
 
-function confidenceThreshold(settings: RouterSettings): number {
-	if (settings.cheapConfidence !== undefined) return settings.cheapConfidence;
-	const raw = process.env.JEV_ROUTER_CHEAP_CONFIDENCE;
-	if (!raw) return DEFAULT_CONFIDENCE;
+function cheapProbabilityThreshold(settings: RouterSettings): number {
+	if (settings.cheapProbability !== undefined) return settings.cheapProbability;
+	const raw = process.env.JEV_ROUTER_CHEAP_PROBABILITY ?? process.env.JEV_ROUTER_CHEAP_CONFIDENCE;
+	if (!raw) return DEFAULT_CHEAP_PROBABILITY;
 	const value = Number(raw);
-	return Number.isFinite(value) && value >= 0 && value <= 1 ? value : DEFAULT_CONFIDENCE;
+	return Number.isFinite(value) && value >= 0 && value <= 1 ? value : DEFAULT_CHEAP_PROBABILITY;
 }
 
 function apiConfig(settings: RouterSettings): JevApiConfig {
@@ -122,9 +123,16 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function getApiKey(backend: JevBackend, config: JevApiConfig, sessionKeys: Partial<Record<JevBackend, string>>): { value: string | undefined; source: string } {
+function getApiKey(
+	backend: JevBackend,
+	config: JevApiConfig,
+	sessionKeys: Partial<Record<JevBackend, string>>,
+	savedKeys: RouterSecrets,
+): { value: string | undefined; source: string } {
 	const sessionValue = sessionKeys[backend]?.trim();
-	if (sessionValue) return { value: sessionValue, source: "session-only key" };
+	if (sessionValue) return { value: sessionValue, source: "current-session key" };
+	const savedValue = savedKeys[backend]?.trim();
+	if (savedValue) return { value: savedValue, source: "saved private key" };
 	const envValue = process.env[config.envKeyName]?.trim();
 	if (envValue) return { value: envValue, source: `environment: ${config.envKeyName}` };
 	return { value: undefined, source: config.keyRequired ? `missing ${config.envKeyName}` : "no key (optional)" };
@@ -213,14 +221,15 @@ async function promptMaskedApiKey(ctx: ExtensionContext, backendLabel: string): 
 
 export default function jevRouterExtension(pi: ExtensionAPI): void {
 	const configPath = settingsFilePath();
+	const secretPath = secretsFilePath();
 	let settings = loadRouterSettings(configPath);
+	let savedApiKeys = loadRouterSecrets(secretPath);
 	const sessionApiKeys: Partial<Record<JevBackend, string>> = {};
 	let enabled = false;
 	let baseModel: Model<Api> | undefined;
 	let switchedByRouter = false;
 	let changingModelInternally = false;
 	let lastStatus = "ready";
-	const autoStart = process.env.JEV_ROUTER_AUTO === "1";
 
 	function updateStatus(ctx: ExtensionContext): void {
 		setStatus(ctx, enabled ? `Jev auto · ${lastStatus}` : undefined);
@@ -228,6 +237,17 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 
 	function persistSettings(patch: RouterSettings): void {
 		settings = saveRouterSettings({ ...settings, ...patch }, configPath);
+	}
+
+	function rememberAutoStart(value: boolean): string | undefined {
+		if (settings.autoStart === value) return undefined;
+		try {
+			persistSettings({ autoStart: value });
+			return undefined;
+		} catch (error) {
+			settings = normalizeRouterSettings({ ...settings, autoStart: value });
+			return errorMessage(error);
+		}
 	}
 
 	function displayEndpoint(config: JevApiConfig): string {
@@ -239,7 +259,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 	function formatApiStatus(): string {
 		try {
 			const config = apiConfig(settings);
-			const key = getApiKey(config.backend, config, sessionApiKeys);
+			const key = getApiKey(config.backend, config, sessionApiKeys, savedApiKeys);
 			return `${config.label} · model ${config.model} · ${displayEndpoint(config)} · key ${key.source}`;
 		} catch (error) {
 			return `API configuration error: ${errorMessage(error)}`;
@@ -262,28 +282,32 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		const api = apiConfig(settings);
-		if (api.keyRequired && !getApiKey(api.backend, api, sessionApiKeys).value) {
-			throw new Error(`Set ${api.envKeyName} before starting Pi, or use the menu to enter a masked session-only key.`);
+		if (api.keyRequired && !getApiKey(api.backend, api, sessionApiKeys, savedApiKeys).value) {
+			throw new Error(`Set ${api.envKeyName} before starting Pi, or enter a masked key in /jev-router.`);
 		}
 		if (api.backend === "custom" && !api.endpoint) {
 			throw new Error("Set a custom /systemone endpoint in /jev-router before enabling this backend.");
 		}
 		if (!ctx.model) throw new Error("Pi has no active model to restore when routing is turned off.");
 		resolveTierModels(ctx, settings);
+		const autoStartSaveError = rememberAutoStart(true);
 		baseModel = ctx.model;
 		switchedByRouter = false;
 		enabled = true;
 		lastStatus = "ready";
 		updateStatus(ctx);
-		notify(ctx, `Jev auto-routing is on (${api.label}). The current task text goes to ${displayEndpoint(api)}; /jev-router off disables it.`);
+		notify(ctx, `Jev auto-routing is on (${api.label}) and will start in new sessions. The current task text goes to ${displayEndpoint(api)}; /jev-router off disables it.`);
+		if (autoStartSaveError) notify(ctx, `Enabled for this session, but could not save auto-start preference: ${autoStartSaveError}`, "warning");
 	}
 
 	async function disableRouter(ctx: ExtensionContext): Promise<void> {
 		if (!enabled) {
-			notify(ctx, "Jev auto-routing is already off.");
+			const saveError = rememberAutoStart(false);
+			notify(ctx, saveError ? `Router is off, but could not clear auto-start: ${saveError}` : "Jev auto-routing is off for future sessions.", saveError ? "warning" : "info");
 			return;
 		}
 		enabled = false;
+		const autoStartSaveError = rememberAutoStart(false);
 		updateStatus(ctx);
 		const restore = baseModel;
 		baseModel = undefined;
@@ -297,7 +321,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 		}
 		switchedByRouter = false;
 		lastStatus = "ready";
-		notify(ctx, "Jev auto-routing is off; restored your pre-router model where needed.");
+		notify(ctx, autoStartSaveError ? `Router is off, but could not clear auto-start: ${autoStartSaveError}` : "Jev auto-routing is off for future sessions; restored your pre-router model where needed.", autoStartSaveError ? "warning" : "info");
 	}
 
 	async function editCustomEndpoint(ctx: ExtensionContext): Promise<boolean> {
@@ -312,7 +336,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			return false;
 		}
 		const origin = new URL(endpoint).origin;
-		const hasKey = Boolean(getApiKey("custom", apiConfig({ ...settings, apiBackend: "custom" }), sessionApiKeys).value);
+		const hasKey = Boolean(getApiKey("custom", apiConfig({ ...settings, apiBackend: "custom" }), sessionApiKeys, savedApiKeys).value);
 		const confirmed = await ctx.ui.confirm(
 			"Trust this Jev endpoint?",
 			`The current task text${hasKey ? " and custom API key" : ""} will be sent to ${origin}. Only continue if you trust this service.`,
@@ -376,18 +400,18 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	async function editConfidence(ctx: ExtensionContext): Promise<void> {
-		const current = confidenceThreshold(settings);
-		const raw = await ctx.ui.input(`Minimum confidence to use the cheap model (0–1; current ${current})`);
+	async function editCheapProbability(ctx: ExtensionContext): Promise<void> {
+		const current = cheapProbabilityThreshold(settings);
+		const raw = await ctx.ui.input(`Minimum Jev probability for the cheap model (0–1; current ${current})`);
 		if (raw === undefined) return;
 		const value = Number(raw.trim());
 		if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 1) {
-			notify(ctx, "Confidence must be a number from 0 to 1.", "error");
+			notify(ctx, "Cheap probability must be a number from 0 to 1.", "error");
 			return;
 		}
 		try {
-			persistSettings({ cheapConfidence: value });
-			notify(ctx, `Cheap-tier confidence threshold saved as ${value}.`);
+			persistSettings({ cheapProbability: value });
+			notify(ctx, `Cheap-tier probability threshold saved as ${value}.`);
 		} catch (error) {
 			notify(ctx, `Could not save router settings: ${errorMessage(error)}`, "error");
 		}
@@ -424,12 +448,18 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	async function editSessionApiKey(ctx: ExtensionContext): Promise<void> {
+	async function editApiKey(ctx: ExtensionContext): Promise<void> {
 		const api = apiConfig(settings);
-		const key = await promptMaskedApiKey(ctx, api.label);
+		const key = await promptMaskedApiKey(ctx, `${api.label} · saved locally with mode 0600`);
 		if (!key) return;
-		sessionApiKeys[api.backend] = key;
-		notify(ctx, `API key set for ${api.label} in this Pi process only; it is masked and not written to disk.`);
+		try {
+			savedApiKeys = saveRouterSecret(api.backend, key, secretPath);
+			delete sessionApiKeys[api.backend];
+			notify(ctx, `API key saved for ${api.label} in ${secretPath} with mode 0600; the key value is never displayed or logged.`);
+		} catch (error) {
+			sessionApiKeys[api.backend] = key;
+			notify(ctx, `Could not save the key securely; it is set only for this Pi process: ${errorMessage(error)}`, "warning");
+		}
 	}
 
 	async function openSettingsMenu(ctx: ExtensionContext): Promise<void> {
@@ -438,16 +468,16 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		const actions = [
-			"Toggle auto-routing",
+			"Toggle routing and remember for new sessions",
 			"Choose API backend",
 			"Set custom endpoint",
 			"Set custom endpoint model id",
 			"Choose OpenCode Zen Jev model",
 			"Choose cheap model",
 			"Choose expensive model",
-			"Set cheap confidence threshold",
-			"Set/replace masked session API key",
-			"Clear session API key",
+			"Set cheap probability threshold",
+			"Set/replace and remember masked API key",
+			"Clear saved/session API key",
 			"Show status",
 			"Close",
 		];
@@ -455,11 +485,11 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			const refs = configuredModelRefs(settings);
 			const api = apiConfig(settings);
 			const selected = await ctx.ui.select(
-				`Jev router · ${enabled ? "ON" : "OFF"}\nAPI: ${api.label} · ${api.model}\nModels: ${refs.cheap} → ${refs.expensive}\nCheap threshold: ${confidenceThreshold(settings)}`,
+				`Jev router · ${enabled ? "ON" : "OFF"} · auto-start ${settings.autoStart ? "ON" : "OFF"}\nAPI: ${api.label} · ${api.model}\nModels: ${refs.cheap} → ${refs.expensive}\nCheap probability threshold: ${cheapProbabilityThreshold(settings)}`,
 				actions,
 			);
 			if (!selected || selected === "Close") return;
-			if (selected === "Toggle auto-routing") {
+			if (selected === "Toggle routing and remember for new sessions") {
 				if (enabled) await disableRouter(ctx);
 				else {
 					try {
@@ -480,25 +510,31 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 				await editModel(ctx, "cheap");
 			} else if (selected === "Choose expensive model") {
 				await editModel(ctx, "expensive");
-			} else if (selected === "Set cheap confidence threshold") {
-				await editConfidence(ctx);
-			} else if (selected === "Set/replace masked session API key") {
-				await editSessionApiKey(ctx);
-			} else if (selected === "Clear session API key") {
+			} else if (selected === "Set cheap probability threshold") {
+				await editCheapProbability(ctx);
+			} else if (selected === "Set/replace and remember masked API key") {
+				await editApiKey(ctx);
+			} else if (selected === "Clear saved/session API key") {
 				delete sessionApiKeys[api.backend];
-				notify(ctx, `Session-only key cleared for ${api.label}.`);
+				try {
+					savedApiKeys = removeRouterSecret(api.backend, secretPath);
+					notify(ctx, `Saved/session key cleared for ${api.label}; an environment key may still be used.`);
+				} catch (error) {
+					notify(ctx, `Could not clear the saved API key: ${errorMessage(error)}`, "error");
+				}
 			} else if (selected === "Show status") {
-				notify(ctx, `${formatApiStatus()}; router ${enabled ? "on" : "off"}; cheap=${refs.cheap}; expensive=${refs.expensive}; threshold=${confidenceThreshold(settings)}.`);
+				notify(ctx, `${formatApiStatus()}; router ${enabled ? "on" : "off"}; auto-start ${settings.autoStart ? "on" : "off"}; last=${lastStatus}; cheap=${refs.cheap}; expensive=${refs.expensive}; Pcheap=${cheapProbabilityThreshold(settings)}.`);
 			}
 		}
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Routing is session-scoped; a new/resumed session starts opt-in again unless AUTO is set.
+		// /jev-router on persists autoStart; an explicit env value can enable or suppress it.
 		enabled = false;
 		switchedByRouter = false;
 		baseModel = ctx.model;
 		lastStatus = "ready";
+		const autoStart = process.env.JEV_ROUTER_AUTO === "1" || (process.env.JEV_ROUTER_AUTO !== "0" && settings.autoStart === true);
 		if (!autoStart) {
 			updateStatus(ctx);
 			return;
@@ -532,7 +568,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			notify(ctx, `Invalid Jev API configuration; router turned off: ${errorMessage(error)}`, "warning");
 			return;
 		}
-		const credential = getApiKey(api.backend, api, sessionApiKeys);
+		const credential = getApiKey(api.backend, api, sessionApiKeys, savedApiKeys);
 		if (api.keyRequired && !credential.value) {
 			enabled = false;
 			updateStatus(ctx);
@@ -547,6 +583,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 
 		const prompt = event.prompt.trim();
 		let tier: ModelTier = "expensive";
+		let cheapProbability: number | undefined;
 		let fallbackReason: string | undefined;
 		if (!prompt) fallbackReason = "empty task text";
 		else if (prompt.length > MAX_PROMPT_CHARS) fallbackReason = `task exceeds ${MAX_PROMPT_CHARS} characters`;
@@ -559,14 +596,16 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			lastStatus = "classifying…";
 			updateStatus(ctx);
 			try {
-				tier = await classifyTask(
+				const decision = await classifyTask(
 					prompt,
 					credential.value ?? "",
-					confidenceThreshold(settings),
+					cheapProbabilityThreshold(settings),
 					controller.signal,
 					undefined,
 					{ backend: api.backend, endpoint: api.endpoint, model: api.model },
 				);
+				tier = decision.tier;
+				cheapProbability = decision.cheapProbability;
 			} catch (error) {
 				if (ctx.signal?.aborted) return;
 				fallbackReason = errorMessage(error);
@@ -581,7 +620,8 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			const target = models[tier];
 			if (!sameModel(ctx.model, target)) await setModelInternally(target);
 			switchedByRouter = !sameModel(target, baseModel);
-			lastStatus = fallbackReason ? `fallback → ${tier}` : `→ ${tier}`;
+			const score = cheapProbability === undefined ? " · no score" : ` · Pcheap ${cheapProbability.toFixed(2)}`;
+			lastStatus = fallbackReason ? `fallback → ${tier}` : `→ ${tier}${score}`;
 			updateStatus(ctx);
 			if (fallbackReason) notify(ctx, `Jev could not classify this prompt (${fallbackReason}); using the ${tier} model.`, "warning");
 		} catch (error) {
@@ -624,7 +664,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 			}
 			if (action === "status") {
 				const refs = configuredModelRefs(settings);
-				notify(ctx, `${formatApiStatus()}; router ${enabled ? "on" : "off"}; cheap=${refs.cheap}; expensive=${refs.expensive}; threshold=${confidenceThreshold(settings)}.`);
+				notify(ctx, `${formatApiStatus()}; router ${enabled ? "on" : "off"}; auto-start ${settings.autoStart ? "on" : "off"}; last=${lastStatus}; cheap=${refs.cheap}; expensive=${refs.expensive}; Pcheap=${cheapProbabilityThreshold(settings)}.`);
 				return;
 			}
 			notify(ctx, "Usage: /jev-router [menu|on|off|status]", "warning");
