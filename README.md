@@ -4,16 +4,16 @@ A Pi extension that asks Jev to classify each new text task, then selects a chea
 
 ## Install with Pi
 
-Install from GitHub now:
-
-```sh
-pi install git:github.com/dimivelev/pi-jev-router
-```
-
-After the npm release is published, install the same extension from npm instead:
+Install from npm:
 
 ```sh
 pi install npm:@dimivelev/pi-jev-router
+```
+
+Or install directly from GitHub:
+
+```sh
+pi install git:github.com/dimivelev/pi-jev-router
 ```
 
 The unscoped `pi-jev-router` package on npm is maintained by someone else; use the `@dimivelev` scope for this project. Restart Pi or run `/reload`, then run `/jev-router` to open the settings menu. During development, load directly with `pi --extension ./index.ts` from this directory.
@@ -84,9 +84,7 @@ The tests mock network calls and cover Noul/Choice routing, the TypeSafe/OpenCod
 
 ## Publishing (maintainers)
 
-The package is configured as a public, scoped Pi package, but it has **not been published to npm**. Its license is currently `UNLICENSED`; the project owner should choose a license and add a `LICENSE` file before publishing if others should be allowed to reuse the code.
-
-To publish, sign in with an npm account authorized to publish under `@dimivelev`, then inspect the tarball and release it:
+The package is configured as a public, scoped Pi package under the MIT license. To release a new version, sign in with an npm account authorized to publish under `@dimivelev`, then inspect the tarball and publish:
 
 ```sh
 npm login

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "A Pi extension that routes tasks between chat models using Jev difficulty classification.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dimivelev/pi-jev-router.git"
@@ -13,7 +13,7 @@
     "url": "https://github.com/dimivelev/pi-jev-router/issues"
   },
   "keywords": ["pi-package", "pi-extension", "jev", "model-routing"],
-  "files": ["index.ts", "policy.ts", "router-settings.ts", "router-secrets.ts", "README.md", ".env.example"],
+  "files": ["index.ts", "policy.ts", "router-settings.ts", "router-secrets.ts", "README.md", "LICENSE", ".env.example"],
   "pi": {
     "extensions": ["./index.ts"]
   },
