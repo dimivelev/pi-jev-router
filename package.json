@@ -1,0 +1,13 @@
+{
+  "name": "pi-jev-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Pi extension that routes tasks between chat models using Jev difficulty classification.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  }
+}
