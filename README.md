@@ -2,16 +2,21 @@
 
 A Pi extension that asks Jev to classify each new text task, then selects a cheap or expensive chat model for the task. It works with Pi 0.87.1+ and Node 22.6+.
 
-## Install globally
+## Install with Pi
 
-From this repository:
+Install from GitHub now:
 
 ```sh
-mkdir -p ~/.pi/agent/extensions/jev-router
-cp index.ts policy.ts router-settings.ts router-secrets.ts ~/.pi/agent/extensions/jev-router/
+pi install git:github.com/dimivelev/pi-jev-router
 ```
 
-Restart Pi or run `/reload`, then run `/jev-router` to open the settings menu. During development, load directly with `pi --extension ./index.ts` from this directory.
+After the npm release is published, install the same extension from npm instead:
+
+```sh
+pi install npm:@dimivelev/pi-jev-router
+```
+
+The unscoped `pi-jev-router` package on npm is maintained by someone else; use the `@dimivelev` scope for this project. Restart Pi or run `/reload`, then run `/jev-router` to open the settings menu. During development, load directly with `pi --extension ./index.ts` from this directory.
 
 ## Default configuration
 
@@ -76,6 +81,21 @@ npm test
 ```
 
 The tests mock network calls and cover Noul/Choice routing, the TypeSafe/OpenCode Zen/custom APIs, settings and secret-file permissions, menu behavior, masked key persistence, and auto-start behavior.
+
+## Publishing (maintainers)
+
+The package is configured as a public, scoped Pi package, but it has **not been published to npm**. Its license is currently `UNLICENSED`; the project owner should choose a license and add a `LICENSE` file before publishing if others should be allowed to reuse the code.
+
+To publish, sign in with an npm account authorized to publish under `@dimivelev`, then inspect the tarball and release it:
+
+```sh
+npm login
+npm test
+npm pack --dry-run
+npm publish
+```
+
+The publish command runs the test suite again. Increase the version in `package.json` before subsequent releases; npm does not allow republishing an existing version. No API keys or local settings files should appear in `npm pack --dry-run`.
 
 ## References
 

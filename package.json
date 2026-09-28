@@ -1,13 +1,38 @@
 {
-  "name": "pi-jev-router",
+  "name": "@dimivelev/pi-jev-router",
   "version": "0.1.0",
-  "private": true,
   "description": "A Pi extension that routes tasks between chat models using Jev difficulty classification.",
   "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dimivelev/pi-jev-router.git"
+  },
+  "homepage": "https://github.com/dimivelev/pi-jev-router#readme",
+  "bugs": {
+    "url": "https://github.com/dimivelev/pi-jev-router/issues"
+  },
+  "keywords": ["pi-package", "pi-extension", "jev", "model-routing"],
+  "files": ["index.ts", "policy.ts", "router-settings.ts", "router-secrets.ts", "README.md", ".env.example"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
   "engines": {
     "node": ">=22.6"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "prepublishOnly": "npm test"
   }
 }
